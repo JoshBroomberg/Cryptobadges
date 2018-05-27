@@ -1,8 +1,9 @@
 pragma solidity ^0.4.16;
 
-// Code adapted from the DAO template here:
+// Code adapted from the DAO blueprint here:
 // https://www.ethereum.org/dao
 
+// Utility contract for ownership functionality.
 contract owned {
     address public owner;
 
@@ -23,28 +24,31 @@ contract owned {
 contract IXBadges is owned {
 
     // Contract Variables
-    uint public debatingPeriodInMinutes;
-    int public minimumThreshold;
-    Proposal[] public proposals;
-    uint public numProposals;
+    uint public debatingPeriodInMinutes; // Min length before proposal can pass
+    uint public minimumVoters; // Min number of votes required to consider valid
+    Proposal[] public proposals; // List of proposals
+    uint public numProposals; // Convinience Counter
 
-    mapping (address => uint) public studentId;
-    Student[] public students;
+    mapping (address => uint) public studentId; // map addresses to ids which index storage array
+    Student[] public students; // storage for students
 
-    mapping (string => uint) badgeId;
-    string[] public badges;
+    mapping (string => uint) badgeId; // map badge names to IDs (bad code, not efficient)
+    string[] public badges; // store badges
 
     struct Proposal {
         address recipient;
         string description;
         uint minExecutionDate;
-        bool executed;
-        bool proposalPassed;
-        uint numberOfVotes;
-        int currentResult;
-        bytes32 proposalHash;
-        Vote[] votes;
-        mapping (address => bool) voted;
+
+        bool executed; // execution state
+        bool proposalPassed; // decision state
+
+        uint numberOfVotes; // total votes
+        int currentResult; // total in agreement
+
+        bytes32 proposalHash; // hash of recipient + badge
+        Vote[] votes; // vote record
+        mapping (address => bool) voted; // voted students tracker
     }
 
     struct Student {
@@ -70,9 +74,9 @@ contract IXBadges is owned {
      */
     constructor (
         uint minutesForDebate,
-        int minimumThresholdForAward
-    )  payable public {
-        changeVotingRules(minutesForDebate, minimumThresholdForAward);
+        uint minimumVotersForAward
+    ) public {
+        changeVotingRules(minutesForDebate, minimumVotersForAward);
 
         // It’s necessary to add an empty first student
         addStudent(0, "");
@@ -84,6 +88,13 @@ contract IXBadges is owned {
         addStudent(owner, 'JMB'); // me :)
     }
 
+    /**
+     * Add badge
+     *
+     * Allows the only the owner to add  a badge called `badgeName`
+     *
+     * @param badgeName name of new badge
+     */
     function addBadge(string badgeName) public {
         // Check existence of badge.
         uint id = badgeId[badgeName];
@@ -106,10 +117,12 @@ contract IXBadges is owned {
         // Check existence of student.
         uint id = studentId[targetStudent];
         if (id == 0) {
+            // Add student to ID list.
             studentId[targetStudent] = students.length;
             id = students.length++;
         }
 
+        // Create and update student struct
         Student storage s = students[id];
         s.student = targetStudent;
         s.studentSince = now;
@@ -119,16 +132,19 @@ contract IXBadges is owned {
     /**
      * Remove student
      *
-     * @notice Remove studentship from `targetStudent`
+     * @notice Remove studentship from `targetStudent` address.
      *
      * @param targetStudent ethereum address to be removed
      */
     function removeStudent(address targetStudent) onlyOwner public {
         require(studentId[targetStudent] != 0);
 
+        // Rewrite the student storage to move the 'gap' to the end.
         for (uint i = studentId[targetStudent]; i<students.length-1; i++){
             students[i] = students[i+1];
         }
+
+        // Delete the last student.
         delete students[students.length-1];
         students.length--;
     }
@@ -137,23 +153,26 @@ contract IXBadges is owned {
      * Change voting rules
      *
      * Make so that proposals need to be discussed for at least `minutesForDebate/60` hours,
-     * have at least minimumThresholdForAward votes to be executed.
+     * have at least minimumVotersForAward votes for a proposal to be executed.
      *
      * @param minutesForDebate the minimum amount of delay between when a proposal is made and when it can be executed
-     * @param minimumThresholdForAward the proposal needs to have this number
+     * @param minimumVotersForAward the proposal needs to have this number of votes to be considered.
      */
     function changeVotingRules(
         uint minutesForDebate,
-        int minimumThresholdForAward
+        uint minimumVotersForAward
     ) onlyOwner public {
         debatingPeriodInMinutes = minutesForDebate;
-        minimumThreshold = minimumThresholdForAward;
+        minimumVoters = minimumVotersForAward;
     }
 
     /**
      * Add Proposal
      *
-     * Propose to send a badge `badgeName to `targetStudent` for `reason`.
+     * Propose to send a badge `badgeName` to `targetStudent` for `reason`.
+     * We only store the hash of the badge name + recipient instead of the badge name
+     * itself so that we don't have to duplicate the storage of long badge names.
+     * The hash is sufficient to prevent abuse later.
      *
      * @param targetStudent who to send the badge to
      * @param badgeName which badge to send
@@ -244,17 +263,17 @@ contract IXBadges is owned {
         require(now > p.minExecutionDate                                            // If it is past the voting deadline
             && !p.executed                                                         // and it has not already been executed
             && p.proposalHash == keccak256(
-                abi.encodePacked(p.recipient, badgeName)));  // and the supplied code matches the proposal                               // and a minimum quorum has been reached...
+                abi.encodePacked(p.recipient, badgeName))   // and the supplied badge name matches the proposal
+            && p.numberOfVotes >= minimumVoters); // and a minimum quorum has been reached...
 
-        // ...then execute result
-
-        if (p.currentResult >= minimumThreshold) {
-            // Proposal passed; execute the transaction
+        // ...then check result (0 means >=50% voted yes (with no additional compute :) )
+        if (p.currentResult >= 0) {
+            // Proposal passed; award the badge
 
             p.proposalPassed = true;
-            p.executed = true; // Avoid recursive calling (reentrancy) by setting this first.
+            p.executed = true; // Avoid recursive calling by setting the state first.
 
-            // Begin execution
+            // Begin execution of award
             uint id  = studentId[p.recipient];
             Student storage student = students[id];
 
@@ -265,6 +284,7 @@ contract IXBadges is owned {
             student.badges.length++;
 
             student.badges[badge_index] = badge_id;
+            // End execution of award
 
 
         } else {
@@ -274,7 +294,12 @@ contract IXBadges is owned {
 
     }
 
-     function checkBadges(
+    /**
+     * Check a Student's badges
+     *
+     * @param student the address of the student.
+     */
+    function checkBadges(
         address student
     )
         onlyStudents constant public
@@ -285,6 +310,9 @@ contract IXBadges is owned {
         return(s.badges);
     }
 
+    /**
+     * Kill the contract and 'erase' content from chain state.
+     */
     function kill()
       onlyOwner public
     {
